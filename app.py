@@ -121,12 +121,9 @@ try:
         st.sidebar.header("Settings")
 
         # Marketplace + preserve-top-rows control
-        marketplace = st.sidebar.selectbox(
-            "Marketplace (for header row preservation)",
-            ["Walmart", "Target/Mirakl", "eBay"],
-            index=0
-        )
-        preserve_map = {"Walmart": 7, "Target/Mirakl": 2, "eBay": 1}
+       marketplace = st.sidebar.selectbox("Marketplace (for header row preservation)",["Walmart", "Target/Mirakl", "eBay", "Amazon"],index=0)
+preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
+
         keep_header_heights = st.sidebar.checkbox(
             f"Keep top rows at original height (recommended for {marketplace})",
             value=True
