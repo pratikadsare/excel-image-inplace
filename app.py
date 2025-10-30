@@ -1,4 +1,4 @@
-# --- Image Opening (with marketplace-based "preserve top rows", PDF skip, progress, dynamic filename) ---
+# --- Image Opening (Marketplace-based header preservation + PDF skip + dynamic filename) ---
 import io
 import re
 import traceback
@@ -87,10 +87,8 @@ def iter_target_cells(ws, target_cols:Set[int], header_row:int):
             yield ws.cell(row=r, column=c)
 
 def adjust_dimensions(ws, col_indices:Set[int], row_height_px:int, preserve_top_rows:int):
-    # Width for preview columns
     for c in col_indices:
         ws.column_dimensions[get_column_letter(c)].width = px_to_col_width(row_height_px)
-    # Height for data rows only (preserve first N rows as-is)
     target_h_pt = px_to_row_height(row_height_px)
     for r in range(1, ws.max_row + 1):
         if r <= max(0, preserve_top_rows):
@@ -106,7 +104,7 @@ def place_anchor_image(ws, cell, url: str, w_px: int, h_px: int, keep_note: bool
     img.height = h_px
     img.anchor = cell.coordinate
     ws.add_image(img)
-    if keep_note: cell.comment = Comment(f"Original URL:\n{url}", "PreviewBot")
+    if keep_note: cell.comment = Comment(f"Original URL:\\n{url}", "PreviewBot")
 
 # ---------------- UI ----------------
 st.title("Image Opening")
@@ -121,16 +119,19 @@ try:
         st.sidebar.header("Settings")
 
         # Marketplace + preserve-top-rows control
-       marketplace = st.sidebar.selectbox("Marketplace (for header row preservation)",["Walmart", "Target/Mirakl", "eBay", "Amazon"],index=0)
-preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
-
+        marketplace = st.sidebar.selectbox(
+            "Marketplace (for header row preservation)",
+            ["Walmart", "Target/Mirakl", "eBay", "Amazon"],
+            index=0
+        )
+        preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
         keep_header_heights = st.sidebar.checkbox(
             f"Keep top rows at original height (recommended for {marketplace})",
             value=True
         )
         preserve_top_rows = preserve_map[marketplace] if keep_header_heights else 0
 
-        # Scope (default: All sheets)
+        # Sheet selection (default All sheets)
         sheet_mode = st.sidebar.radio("Sheets to process", ["One sheet", "All sheets"], index=1, horizontal=True)
         if sheet_mode == "One sheet":
             sheet_name = st.sidebar.selectbox("Which sheet?", sheets, index=0)
@@ -138,7 +139,7 @@ preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
         else:
             target_sheets = sheets
 
-        # Other options
+        # Size & options
         header_row = st.sidebar.number_input("Header row number (for detecting column names)", min_value=1, value=1, step=1)
         width  = st.sidebar.number_input("Image width (px)",  min_value=40, value=140, step=10)
         height = st.sidebar.number_input("Image height (px)", min_value=40, value=140, step=10)
@@ -146,7 +147,7 @@ preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
         create_adjacent = st.sidebar.checkbox("Create preview in NEW adjacent column(s)", value=False,
                                               help="Keep URL column intact; add *_preview column to the right.")
 
-        # Build header list from first target sheet
+        # Detect URL columns
         ws0 = wb[target_sheets[0]]
         headers = []
         for c in range(1, ws0.max_column + 1):
@@ -164,7 +165,7 @@ preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
         def headers_to_indices(ws, names:List[str])->Set[int]:
             return set(columns_by_names(ws, names, header_row=header_row))
 
-        # Preview counts + total
+        # Preview summary
         total_urls = 0
         preview_rows = []
         for s in target_sheets:
@@ -185,7 +186,7 @@ preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
             use_container_width=True
         )
 
-        # Process
+        # Process images
         if st.button("Process & Prepare Download", type="primary"):
             processed = inserted = skipped_nonimage = failed = 0
             progress = st.progress(0)
@@ -211,14 +212,14 @@ preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
                 else:
                     preview_targets = targets
 
-                # Size grid (preserving top N rows as chosen)
+                # Resize grid (preserving top N rows)
                 adjust_dimensions(ws, preview_targets, row_height_px=max(width, height), preserve_top_rows=preserve_top_rows)
 
-                # Embed images (ANCHOR mode) with PDF/non-image skip
+                # Insert images
                 for cell in iter_target_cells(ws, preview_targets, header_row=header_row):
                     src_cell = cell if not create_adjacent else ws.cell(row=cell.row, column=cell.column - 1)
                     val = src_cell.value
-                    if not (isinstance(val, str) and is_url_like(val)): 
+                    if not (isinstance(val, str) and is_url_like(val)):
                         continue
                     url = normalize_url(val) or val.strip()
 
@@ -252,7 +253,7 @@ preserve_map = {"Walmart": 6, "Target/Mirakl": 2, "eBay": 1, "Amazon": 4}
                             progress.progress(min(processed/total_urls, 1.0))
                             status.write(f"Processed {processed}/{total_urls} | inserted:{inserted}, skipped:{skipped_nonimage}, failed:{failed}")
 
-            # Save + dynamic file name with "-preview"
+            # Save file + dynamic naming
             out = io.BytesIO()
             wb.save(out); out.seek(0)
             orig_name = uploaded.name
