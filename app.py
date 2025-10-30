@@ -1,4 +1,4 @@
-# --- Image Opening (final version with PDF skip + better error handling) ---
+# --- Image Opening (with marketplace-based "preserve top rows", PDF skip, progress, dynamic filename) ---
 import io
 import re
 import traceback
@@ -42,7 +42,7 @@ def normalize_url(s: str, default_scheme: str = DEFAULT_SCHEME) -> Optional[str]
         return f"{default_scheme}{s}"
     return None
 
-# HEAD/GET content-type detection
+# HEAD/GET content-type detection (for skipping PDFs and non-images)
 def get_content_type(url: str, timeout: float = 10.0) -> Optional[str]:
     try:
         r = requests.head(url, timeout=timeout, allow_redirects=True)
@@ -86,11 +86,15 @@ def iter_target_cells(ws, target_cols:Set[int], header_row:int):
         for c in target_cols:
             yield ws.cell(row=r, column=c)
 
-def adjust_dimensions(ws, col_indices:Set[int], row_height_px:int):
+def adjust_dimensions(ws, col_indices:Set[int], row_height_px:int, preserve_top_rows:int):
+    # Width for preview columns
     for c in col_indices:
         ws.column_dimensions[get_column_letter(c)].width = px_to_col_width(row_height_px)
+    # Height for data rows only (preserve first N rows as-is)
     target_h_pt = px_to_row_height(row_height_px)
     for r in range(1, ws.max_row + 1):
+        if r <= max(0, preserve_top_rows):
+            continue
         ws.row_dimensions[r].height = target_h_pt
 
 def place_anchor_image(ws, cell, url: str, w_px: int, h_px: int, keep_note: bool):
@@ -102,11 +106,10 @@ def place_anchor_image(ws, cell, url: str, w_px: int, h_px: int, keep_note: bool
     img.height = h_px
     img.anchor = cell.coordinate
     ws.add_image(img)
-    if keep_note: cell.comment = Comment(f"Original URL:\\n{url}", "PreviewBot")
+    if keep_note: cell.comment = Comment(f"Original URL:\n{url}", "PreviewBot")
 
 # ---------------- UI ----------------
 st.title("Image Opening")
-
 uploaded = st.file_uploader("Upload your Excel masterfile (.xlsx)", type=["xlsx"])
 
 try:
@@ -116,6 +119,21 @@ try:
         sheets = wb.sheetnames
 
         st.sidebar.header("Settings")
+
+        # Marketplace + preserve-top-rows control
+        marketplace = st.sidebar.selectbox(
+            "Marketplace (for header row preservation)",
+            ["Walmart", "Target/Mirakl", "eBay"],
+            index=0
+        )
+        preserve_map = {"Walmart": 7, "Target/Mirakl": 2, "eBay": 1}
+        keep_header_heights = st.sidebar.checkbox(
+            f"Keep top rows at original height (recommended for {marketplace})",
+            value=True
+        )
+        preserve_top_rows = preserve_map[marketplace] if keep_header_heights else 0
+
+        # Scope (default: All sheets)
         sheet_mode = st.sidebar.radio("Sheets to process", ["One sheet", "All sheets"], index=1, horizontal=True)
         if sheet_mode == "One sheet":
             sheet_name = st.sidebar.selectbox("Which sheet?", sheets, index=0)
@@ -123,17 +141,22 @@ try:
         else:
             target_sheets = sheets
 
-        header_row = st.sidebar.number_input("Header row number", min_value=1, value=1, step=1)
-        width = st.sidebar.number_input("Image width (px)", min_value=40, value=140, step=10)
+        # Other options
+        header_row = st.sidebar.number_input("Header row number (for detecting column names)", min_value=1, value=1, step=1)
+        width  = st.sidebar.number_input("Image width (px)",  min_value=40, value=140, step=10)
         height = st.sidebar.number_input("Image height (px)", min_value=40, value=140, step=10)
         keep_notes = st.sidebar.checkbox("Keep original URL as cell note", value=True)
         create_adjacent = st.sidebar.checkbox("Create preview in NEW adjacent column(s)", value=False,
                                               help="Keep URL column intact; add *_preview column to the right.")
 
+        # Build header list from first target sheet
         ws0 = wb[target_sheets[0]]
-        headers = [ws0.cell(row=header_row, column=c).value or f"Col {c}" for c in range(1, ws0.max_column + 1)]
+        headers = []
+        for c in range(1, ws0.max_column + 1):
+            v = ws0.cell(row=header_row, column=c).value
+            headers.append(v.strip() if isinstance(v, str) else f"Col {c}")
         auto_cols_idx = detect_url_columns(ws0, header_row=header_row)
-        auto_cols_names = [str(headers[i-1]).strip() for i in auto_cols_idx]
+        auto_cols_names = [headers[i-1] if i-1 < len(headers) else f"Col {i}" for i in auto_cols_idx]
 
         selected_by_name = st.multiselect(
             "Pick URL columns by header (auto-detected suggestions pre-selected)",
@@ -144,20 +167,28 @@ try:
         def headers_to_indices(ws, names:List[str])->Set[int]:
             return set(columns_by_names(ws, names, header_row=header_row))
 
+        # Preview counts + total
         total_urls = 0
         preview_rows = []
         for s in target_sheets:
             ws = wb[s]
             targets = headers_to_indices(ws, selected_by_name) if selected_by_name else set(detect_url_columns(ws, header_row=header_row))
-            count = sum(1 for cell in iter_target_cells(ws, targets, header_row=header_row)
-                        if isinstance(cell.value, str) and is_url_like(cell.value))
+            count = 0
+            for cell in iter_target_cells(ws, targets, header_row=header_row):
+                v = cell.value if not create_adjacent else ws.cell(row=cell.row, column=cell.column - 1).value
+                if isinstance(v, str) and is_url_like(v):
+                    count += 1
             total_urls += count
             preview_rows.append((s, len(targets), count))
 
-        st.dataframe({"Sheet": [r[0] for r in preview_rows],
-                      "Target columns": [r[1] for r in preview_rows],
-                      "URL cells found": [r[2] for r in preview_rows]}, use_container_width=True)
+        st.dataframe(
+            {"Sheet": [r[0] for r in preview_rows],
+             "Target columns": [r[1] for r in preview_rows],
+             "URL cells found": [r[2] for r in preview_rows]},
+            use_container_width=True
+        )
 
+        # Process
         if st.button("Process & Prepare Download", type="primary"):
             processed = inserted = skipped_nonimage = failed = 0
             progress = st.progress(0)
@@ -168,6 +199,7 @@ try:
                 targets = headers_to_indices(ws, selected_by_name) if selected_by_name else set(detect_url_columns(ws, header_row=header_row))
                 if not targets: continue
 
+                # Decide preview columns (same or adjacent)
                 preview_targets = set()
                 if create_adjacent:
                     inserted_cols = 0
@@ -182,12 +214,15 @@ try:
                 else:
                     preview_targets = targets
 
-                adjust_dimensions(ws, preview_targets, row_height_px=max(width, height))
+                # Size grid (preserving top N rows as chosen)
+                adjust_dimensions(ws, preview_targets, row_height_px=max(width, height), preserve_top_rows=preserve_top_rows)
 
+                # Embed images (ANCHOR mode) with PDF/non-image skip
                 for cell in iter_target_cells(ws, preview_targets, header_row=header_row):
                     src_cell = cell if not create_adjacent else ws.cell(row=cell.row, column=cell.column - 1)
                     val = src_cell.value
-                    if not (isinstance(val, str) and is_url_like(val)): continue
+                    if not (isinstance(val, str) and is_url_like(val)): 
+                        continue
                     url = normalize_url(val) or val.strip()
 
                     ct = get_content_type(url)
@@ -195,12 +230,12 @@ try:
                         skipped_nonimage += 1
                         if keep_notes and not create_adjacent:
                             try:
-                                cell.comment = Comment(f"Skipped (non-image: {ct or 'unknown'})\\n{url}", "PreviewBot")
+                                cell.comment = Comment(f"Skipped (non-image: {ct or 'unknown'})\n{url}", "PreviewBot")
                             except Exception:
                                 pass
                         processed += 1
                         if total_urls:
-                            progress.progress(min(processed/total_urls,1.0))
+                            progress.progress(min(processed/total_urls, 1.0))
                             status.write(f"Processed {processed}/{total_urls} | inserted:{inserted}, skipped:{skipped_nonimage}, failed:{failed}")
                         continue
 
@@ -211,19 +246,21 @@ try:
                         failed += 1
                         if keep_notes and not create_adjacent:
                             try:
-                                cell.comment = Comment(f"Preview failed; kept value.\\n{url}\\nError: {e}", "PreviewBot")
+                                cell.comment = Comment(f"Preview failed; kept value.\n{url}\nError: {e}", "PreviewBot")
                             except Exception:
                                 pass
                     finally:
                         processed += 1
                         if total_urls:
-                            progress.progress(min(processed/total_urls,1.0))
+                            progress.progress(min(processed/total_urls, 1.0))
                             status.write(f"Processed {processed}/{total_urls} | inserted:{inserted}, skipped:{skipped_nonimage}, failed:{failed}")
 
+            # Save + dynamic file name with "-preview"
             out = io.BytesIO()
             wb.save(out); out.seek(0)
             orig_name = uploaded.name
             out_name = orig_name[:-5] + "-preview.xlsx" if orig_name.lower().endswith(".xlsx") else orig_name + "-preview.xlsx"
+
             status.write(f"Completed {processed}/{total_urls} | inserted:{inserted}, skipped:{skipped_nonimage}, failed:{failed}")
             st.success("Done! Download your updated workbook below.")
             st.download_button("⬇️ Download updated masterfile", data=out,
