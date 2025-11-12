@@ -183,7 +183,7 @@ try:
             {"Sheet": [r[0] for r in preview_rows],
              "Target columns": [r[1] for r in preview_rows],
              "URL cells found": [r[2] for r in preview_rows]},
-            use_container_width=True
+            width="stretch"
         )
 
         # Process images
